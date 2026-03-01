@@ -56,8 +56,8 @@ function New-DefaultConfig {
         "flash_attn"          = "auto"   # "on", "off", or "auto" (auto = on if supported, off otherwise)
         "cache_type_k"        = $null
         "cache_type_v"        = $null
-        "use_mmap"            = $true
-        "use_mlock"           = $false
+        "use_mmap"            = $true    # keep true — mmap is correct for Windows; false+mlock causes VirtualLock failures
+        "use_mlock"           = $false   # requires elevated privileges on Windows; leave false unless you know you need it
         "numa"                = $null
         "defrag_thold"        = $null
         "rope_freq_base"      = $null
@@ -86,6 +86,7 @@ function New-DefaultConfig {
         "port"                = 8080
         "parallel"            = $null
         "cont_batching"       = $true
+        "chat_template"       = $null   # e.g. "chatml", "llama3", "gemma", "mistral" — null = auto-detect
         "system_prompt"       = $null
     }
 }
@@ -459,6 +460,26 @@ function Write-ConfigHelp {
                Accepted : true, false
                Default  : true
 
+  chat_template (string or null)
+               Override the chat template used to format messages sent to
+               the model. By default llama-server auto-detects the template
+               from the GGUF metadata, but it sometimes picks the wrong one
+               (e.g. "Hermes 2 Pro" for a Qwen model), causing the model to
+               return empty or garbled responses.
+               Set this when the server logs show the wrong chat format, or
+               when the model returns blank output on the first message.
+               Common values:
+                 "chatml"    — Qwen, Mistral-Nemo, many fine-tunes
+                 "llama3"    — Meta Llama 3 / 3.1 / 3.2 / 3.3
+                 "gemma"     — Google Gemma 2 / 3
+                 "mistral"   — Mistral 7B v0.1 / v0.2
+                 "phi3"      — Microsoft Phi-3 / Phi-3.5
+                 "deepseek3" — DeepSeek-V3 / R1
+                 "falcon3"   — Falcon 3
+                 "command-r" — Cohere Command R / R+
+               Full list: https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template
+               Default  : null (auto-detect from GGUF metadata)
+
   system_prompt (string or null)
                Default system prompt injected at the start of every session.
                In CLI mode leave null to start with no injected text.
@@ -485,8 +506,9 @@ function Write-ConfigHelp {
    n_gpu_layers    = 999
    cont_batching   = true
 
- Vision / VLM model (e.g. Ministral 3 8B, LLaVA, Qwen2-VL):
+ Vision / VLM model (e.g. Ministral 3 8B, LLaVA, Qwen2-VL, Qwen3-VL):
    mmproj_path     = "C:\path\to\mmproj-f16.gguf"
+   chat_template   = "chatml"   (set this if the model returns empty responses)
    In CLI mode type /image C:\path\to\photo.jpg then ask your question.
 
 ===============================================================================
@@ -623,6 +645,17 @@ function Download-HuggingFaceModel {
             return $null
         }
 
+        # Derive a safe subfolder name from the repo ID (use the part after the last '/')
+        # and strip any characters that are invalid in Windows folder names.
+        $repoFolderName = ($repoId -split '/')[-1] -replace '[\\/:*?"<>|]', '_'
+        $ModelSubDir    = "$ModelsDir\$repoFolderName"
+        if (-not (Test-Path $ModelSubDir)) {
+            New-Item -ItemType Directory -Path $ModelSubDir | Out-Null
+            Write-Host "  Created model folder: $repoFolderName" -ForegroundColor DarkGray
+        } else {
+            Write-Host "  Using existing model folder: $repoFolderName" -ForegroundColor DarkGray
+        }
+
         # Select main model
         Write-Host "`nAvailable model files:"
         for ($i = 0; $i -lt $modelFiles.Count; $i++) {
@@ -631,7 +664,7 @@ function Download-HuggingFaceModel {
         $fileChoice   = Read-Host "Select a file (1-$($modelFiles.Count))"
         $selectedFile = $modelFiles[[int]$fileChoice - 1]
         $saveFileName = Split-Path $selectedFile -Leaf
-        $savePath     = "$ModelsDir\$saveFileName"
+        $savePath     = "$ModelSubDir\$saveFileName"
 
         # Vision: offer mmproj download
         $mmprojSavePath    = $null
@@ -646,7 +679,7 @@ function Download-HuggingFaceModel {
             if (-not [string]::IsNullOrWhiteSpace($mmprojChoice)) {
                 $selectedMmproj     = $mmprojFiles[[int]$mmprojChoice - 1]
                 $mmprojSaveFileName = Split-Path $selectedMmproj -Leaf
-                $mmprojSavePath     = "$ModelsDir\$mmprojSaveFileName"
+                $mmprojSavePath     = "$ModelSubDir\$mmprojSaveFileName"
                 Write-Host "  Will also download: $mmprojSaveFileName" -ForegroundColor Green
             }
         }
@@ -876,6 +909,14 @@ function Start-LlamaApp {
 
     $argList = [System.Collections.Generic.List[string]]::new()
 
+    # ARM64 Windows builds have a deadlock in the warmup path -- inject --no-warmup automatically.
+    # The first real inference request will be marginally slower but the process will not hang.
+    $isArm64Backend = $ExecutablePath -match "arm64"
+    if ($isArm64Backend) {
+        $argList.Add("--no-warmup")
+        Write-Host "  ARM64 backend detected - warmup disabled automatically." -ForegroundColor DarkYellow
+    }
+
     # ---- llama-mtmd-cli (vision + text CLI) ----------------------------------
     if ($Mode -eq "mtmd") {
         Add-Arg    $argList "-m"                $config.gguf_path
@@ -973,6 +1014,7 @@ function Start-LlamaApp {
         Add-Arg    $argList "--port"             $config.port
         Add-Arg    $argList "--alias"            $config.model_name
         Add-Arg    $argList "-np"                $config.parallel
+        Add-Arg    $argList "--chat-template"    $config.chat_template
         Add-Arg    $argList "--system-prompt"    $config.system_prompt
         Add-Switch $argList "--cont-batching"    $config.cont_batching
 
