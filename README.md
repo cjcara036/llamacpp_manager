@@ -1,277 +1,188 @@
 # llama.cpp Manager
 
-The ultimate local AI runner for Windows. This PowerShell script simplifies running llama.cpp by automatically managing backends, downloading models from Hugging Face, generating optimized configurations, and providing both CLI and server modes with full vision/multimodal support.
+A single, self-contained Bash script that downloads, configures, and runs **llama.cpp** models — no manual compilation, no manual flag-hunting.
 
-## Features
+```
+llamacpp-manager.sh
+├── Downloads the right pre-built binary for your hardware
+├── Pulls GGUF models straight from Hugging Face
+├── Manages per-model JSON configs (auto-synced to the binary's real flags)
+├── Runs in Server, CLI, or interactive terminal mode
+└── SWEEP mode: auto-benchmarks your setup for optimal tok/s
+```
 
-- 🚀 **Zero-Setup Experience** - Just run the script, no manual installation required
-- 🎯 **Hardware-Aware** - Auto-detects your GPU/CPU and recommends the optimal backend
-- 📥 **Auto-Downloader** - Downloads llama.cpp backends and GGUF models with resume support
-- ⚙️ **Smart Configs** - Auto-generates JSON configs with 40+ tunable parameters
-- 🖼️ **Vision Support** - Full multimodal model support (LLaVA, Ministral, Qwen2-VL)
-- 🔌 **Dual Modes** - Interactive CLI for testing + HTTP Server for apps
-- 📚 **Built-in Help** - Auto-generated reference guides for every config parameter
-- 🔄 **Resume Support** - Interrupted downloads can be resumed automatically
+---
 
 ## Requirements
 
-- **Windows 10/11**
-- **PowerShell 5.1+** (included with Windows)
-- **curl** (included with Windows 10+)
-- Internet connection for initial downloads
+| Dependency | Why |
+|---|---|
+| `bash` 4+ | Associative arrays, `readarray`, etc. |
+| `curl` | Downloads |
+| `jq` | JSON config parsing & writing |
+| `tar` / `unzip` | Extract binaries & archives |
+| `lspci` (pciutils) | GPU detection |
+| `grep`, `sed`, `awk` | Text processing |
+
+> **Auto-installer:** The script checks for missing dependencies on launch and attempts to install them via `apt`, `dnf`, `pacman`, or `zypper` automatically.
+
+---
 
 ## Quick Start
 
-1. **Run the script:**
-   ```powershell
-   .\llamacpp-manager.ps1
-   ```
-
-2. **Select a backend** (the script will recommend the best one for your system):
-   - Option 1: CUDA (NVIDIA GPUs - Fastest)
-   - Option 2: Vulkan (AMD/Intel GPUs - Good compatibility)
-   - Option 3: CPU (No GPU / Basic fallback)
-   - Option 4: ARM64 (Native Snapdragon / ARM)
-
-3. **Download a model** (or select an existing one):
-   - Enter a Hugging Face repo ID (e.g., `unsloth/Ministral-3-8B-Instruct-2512-GGUF`)
-   - Select the quantization file you want
-   - Optionally download a vision projector file for multimodal models
-
-4. **Choose a run mode:**
-   - **CLI Mode** - Interactive terminal for quick testing
-   - **Server Mode** - HTTP API endpoint (OpenAI-compatible)
-
-That's it! The script handles everything else.
-
-## Usage Guide
-
-### Step 1: Backend Selection
-
-The script will scan your hardware and recommend the best backend:
-
-- **CUDA** - Best for NVIDIA GPUs (fastest performance)
-- **Vulkan** - Works with AMD, Intel, and other GPUs
-- **CPU** - Fallback for systems without GPUs
-- **ARM64** - Native execution on Snapdragon/ARM Windows devices
-
-The backend is downloaded from the official [llama.cpp GitHub releases](https://github.com/ggerganov/llama.cpp/releases).
-
-### Step 2: Model Download
-
-Download any GGUF model from Hugging Face:
-
-```powershell
-Enter the Repo ID: unsloth/Ministral-3-8B-Instruct-2512-GGUF
+```bash
+chmod +x llamacpp-manager.sh
+./llamacpp-manager.sh
 ```
 
-The script will:
-- List all available GGUF files in the repo
-- Let you select the quantization (Q4_K_XL, Q5_K_M, Q8_0, etc.)
-- Offer to download vision projector files for multimodal models
-- Auto-generate a JSON config file with optimal defaults
-- Create a comprehensive `.help.txt` reference guide
+That's it. The script walks you through everything.
 
-**Private Repos:** If the model requires a Hugging Face token, the script will prompt you to enter your `HF_TOKEN`.
+---
 
-### Step 3: Run Mode Selection
+## What Happens Step-by-Step
 
-#### CLI Mode (Interactive Terminal)
+### 1. Hardware Detection
 
-Perfect for quick testing and experimentation:
+The script scans your CPU architecture and GPU(s), then **recommends** the best backend:
 
-- Type your questions directly
-- For vision models: Type `/image C:\path\to\photo.jpg` then your question on the next line
-- Press `Ctrl+C` to exit
+| Backend | Use when |
+|---|---|
+| **CUDA** | NVIDIA GPU (fastest) |
+| **Vulkan** | Intel / AMD GPU (good compatibility) |
+| **CPU / AVX2** | No GPU, or you just want simplicity |
+| **ARM64** | Linux on ARM (native) |
+| **ROCm** | AMD GPU (native accelerated) |
 
-#### Server Mode (HTTP API)
+Press **Enter** to accept the recommendation, or type the number to choose manually.
 
-Run a local OpenAI-compatible API server:
+### 2. Binary Download
 
-- Default endpoint: `http://127.0.0.1:8080/v1`
-- Compatible with chat UIs (Open WebUI, text-generation-webui, etc.)
-- Supports streaming responses
-- Press `Ctrl+C` to stop
+- Fetches the latest release from [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp/releases) via GitHub API
+- Supports **resume** on interrupted downloads (`curl -C -`)
+- Extracts to `./llamacpp_bin/<backend>/`
+- If a backend folder already exists, it asks whether to **update** or **reuse**
 
-## Configuration
+### 3. Model Download (Hugging Face)
 
-Each model gets its own JSON configuration file in the `Configs/` directory with 40+ tunable parameters:
+- Paste a **Repo ID** or full **Hugging Face URL** (e.g. `unsloth/Qwen3.8-27B-GGUF`)
+- Lists all `.gguf` files in the repo
+- Optionally downloads an **mmproj** vision projector file
+- Supports **gated repos** — prompts for an `HF_TOKEN` on the first failed attempt
+- All model files land in `./Models/<repo_name>/`
+
+### 4. Auto-Generated JSON Config
+
+Every downloaded model gets a config file in `./Configs/`:
 
 ```json
 {
-  "model_name": "ministral-3-8b-instruct-2512-ud-q4_k_xl",
-  "gguf_path": "C:\\path\\to\\model.gguf",
-  "mmproj_path": "C:\\path\\to\\mmproj-f16.gguf",
+  "model_name": "qwen3-8b-instruct",
+  "gguf_path": "./Models/unsloth/Qwen3.8-27B-GGUF/Qwen3-8B-Instruct-Q4_K_M.gguf",
+  "mmproj_path": null,
   "n_ctx": 8192,
-  "n_gpu_layers": 999,
+  "batch_size": 512,
+  "n_gpu_layers": 33,
   "flash_attn": "auto",
-  "cache_type_k": "q8_0",
-  "cache_type_v": "q8_0",
+  "perf": true,
   "host": "127.0.0.1",
   "port": 8080,
-  ...
+  "cont_batching": true
 }
 ```
 
-### Key Parameters
+### 5. Flag Auto-Discovery (the magic part)
 
-| Parameter | Description | Typical Values |
-|-----------|-------------|----------------|
-| `n_ctx` | Context window size (tokens) | 8192, 16384, 32768 |
-| `n_gpu_layers` | Layers offloaded to GPU (999 = all) | 0, 33, 999 |
-| `flash_attn` | Reduce KV cache VRAM usage | "on", "off", "auto" |
-| `cache_type_k` | Key cache quantization | "f16", "q8_0", "q4_0" |
-| `cache_type_v` | Value cache quantization | "f16", "q8_0", "q4_0" |
-| `temp` | Sampling temperature | 0.0 - 2.0 (lower = more deterministic) |
-| `top_p` | Nucleus sampling | 0.9, 0.95 |
-| `n_threads` | CPU threads (physical cores) | Your CPU core count |
+The script runs `llama-server --help` and **parses every flag the binary actually supports**. Then:
 
-### Reference Guide
+- **Resolves** your config keys to the correct CLI flag name (handles renames across versions, e.g. `-m` → `--model`)
+- **Adds** any new flags the binary exposes that your config doesn't have yet (as `null`)
+- **Skips** keys the binary doesn't understand (with a warning)
 
-Every config file has a matching `.help.txt` file with comprehensive documentation for all parameters. Open it to learn about:
+This means your JSON config stays compatible even as llama.cpp evolves its CLI.
 
-- Context and batching options
-- GPU offloading and multi-GPU setups
-- Flash attention and KV cache quantization
-- RoPE scaling for context extension
-- Group attention and YaRN methods
-- Sampling and generation parameters
-- Server-specific settings
+### 6. Interactive Settings Editor
 
-## Supported Backends
+Press **`e`** in the model menu to open the editor. For every setting you get:
 
-### CUDA (NVIDIA GPUs)
-- **Best for:** NVIDIA GeForce, RTX, Quadro, Tesla GPUs
-- **Performance:** Fastest available
-- **Features:** Full flash attention support, CUDA graphs
+- The **current value**
+- The **matched CLI flag**
+- The **binary's help text** for that flag
+- A **value hint** (e.g. `Boolean: [ true | false | null ]`)
 
-### Vulkan (AMD/Intel/Other GPUs)
-- **Best for:** AMD Radeon, Intel Arc, integrated GPUs
-- **Performance:** Good GPU acceleration
-- **Features:** Wide hardware compatibility
+Type a new value to change it. Type `null` or leave blank to reset.
 
-### CPU
-- **Best for:** Systems without GPUs or for testing
-- **Performance:** Slower but functional
-- **Note:** Flash attention not supported on CPU backend
+### 7. Run Modes
 
-### ARM64
-- **Best for:** Snapdragon/ARM Windows devices
-- **Performance:** Native ARM execution
+| Mode | Binary | What it does |
+|---|---|---|
+| **Server** | `llama-server` | HTTP API server for OpenAI-compatible endpoints, chat UIs, apps |
+| **CLI** | `llama-cli` / `llama-run` / `llama-mtmd-cli` | Interactive terminal chat |
+| **SWEEP** | `llama-server` | Benchmark & auto-optimize (see below) |
 
-## Vision/Multimodal Support
+### 8. SWEEP Mode 🏎️
 
-The script fully supports vision language models (VLMs):
+Automatically benchmarks your setup by sweeping through parameter combinations in phases:
 
-### Supported Vision Models
-- Ministral 3 8B Instruct
-- LLaVA (all variants)
-- Qwen2-VL
-- MiniCPM-V
-- And any other llama.cpp-compatible vision model
+| Phase | Parameter | Values Tested |
+|---|---|---|
+| 0 | `batch_size` | 128, 256, 512, 1024, 2048 |
+| 1 | `parallel` | 1, 2, 4, 8, 16 |
+| 2 | `cont_batching` | true / false |
+| 3 | `use_mmap` | true / false |
+| 4 | `use_mlock` | false / true *(root only)* |
+| 5 | `numa` | null / distribute / isolate *(multi-NUMA only)* |
 
-### How Vision Works
+Each phase tests the best result from the previous phase, so it converges quickly. At the end you get a **results table** with tok/s for every combination so you can pick the winner.
 
-1. **Download both files:**
-   - Main model file (e.g., `Ministral-3-8B-Instruct-2512-GGUF`)
-   - Vision projector file (e.g., `mmproj-f16.gguf`)
-
-2. **In CLI Mode:**
-   ```
-   /image C:\path\to\photo.jpg
-   What do you see in this image?
-   ```
-
-3. **In Server Mode:**
-   The API accepts image payloads - send base64-encoded images with your prompts.
+---
 
 ## Directory Structure
 
 ```
-llama_cpp/
-├── llamacpp-manager.ps1           # Main script
-├── README.md                       # This file
-├── llamacpp_bin/                  # Backend binaries
-│   ├── cuda/                       # CUDA backend
-│   ├── vulkan/                     # Vulkan backend
-│   ├── cpu/                        # CPU backend
-│   └── arm64/                      # ARM64 backend
-├── Models/                         # Downloaded GGUF files
-│   ├── Ministral-3-8B-Instruct-2512-UD-Q4_K_XL.gguf
-│   └── mmproj-F16.gguf
-└── Configs/                        # Model configurations
-    ├── ministral-3-8b-instruct-2512-ud-q4_k_xl.json
-    └── ministral-3-8b-instruct-2512-ud-q4_k_xl.help.txt
+./
+├── llamacpp-manager.sh          # The script
+├── llamacpp_bin/
+│   ├── cuda/                    # or vulkan/, cpu/, arm64/, rocm/
+│   │   ├── llama-server
+│   │   ├── llama-cli
+│   │   ├── llama-run
+│   │   ├── llama-mtmd-cli
+│   │   └── ...
+├── Models/
+│   ├── unsloth/                 # One folder per HF repo
+│   │   ├── *.gguf
+│   │   └── mmproj*.gguf        # (optional vision projector)
+└── Configs/
+    ├── qwen3-8b-instruct.json   # One config per model
+    └── llama-3-8b.json
 ```
-
-## Troubleshooting
-
-### "Model not found" error
-Check the `gguf_path` in your JSON config file. The path must match where the model file is located.
-
-### Backend download fails
-- Check your internet connection
-- Try running the script again (it will offer to update the backend)
-- Verify GitHub releases are accessible
-
-### Hugging Face download fails
-- Some models require a Hugging Face account and token
-- Create a token at https://huggingface.co/settings/tokens
-- Re-run the script and enter the token when prompted
-
-### Out of memory errors
-- Reduce `n_ctx` (context size)
-- Reduce `n_gpu_layers` (partial CPU offloading)
-- Enable `cache_type_k` and `cache_type_v` quantization
-- Enable `flash_attn` = "on"
-
-### Slow performance
-- For NVIDIA: Use CUDA backend with `n_gpu_layers = 999`
-- Enable `flash_attn = "auto"` or `"on"`
-- Set `n_threads` to your physical CPU core count
-- Consider using a smaller quantization (Q4_K_M instead of Q8_0)
-
-## FAQ
-
-**Q: Do I need to install anything?**  
-A: No! Just run the PowerShell script. It downloads everything automatically.
-
-**Q: Can I run multiple models at once?**  
-A: Yes, if running in Server Mode, set `parallel` in your config to enable multiple concurrent inference slots.
-
-**Q: How do I update to the latest llama.cpp version?**  
-A: Re-run the script and select "y" when it asks to pull the latest update for your backend.
-
-**Q: Can I use this with chat UIs?**  
-A: Yes! Run in Server Mode and connect any OpenAI-compatible chat UI to `http://127.0.0.1:8080/v1`.
-
-**Q: What's the difference between llama-cli and llama-mtmd-cli?**  
-A: `llama-mtmd-cli` is the newer vision-capable CLI. The script automatically uses it for vision models.
-
-**Q: How do I know if my model supports vision?**  
-A: Check if the Hugging Face repo has a `*mmproj*.gguf` file. The script will detect and offer to download it.
-
-**Q: Can I use models from sources other than Hugging Face?**  
-A: Yes! Manually place GGUF files in the `Models/` directory and create/edit a JSON config file in `Configs/`.
-
-**Q: What's the recommended quantization?**  
-A: For most users, Q4_K_M or Q4_K_XL provides a good balance of quality and size. Use Q8_0 for higher quality if you have enough RAM/VRAM.
-
-## License
-
-This script is provided as-is for managing llama.cpp. The llama.cpp project is licensed under the MIT License.
-
-## Related Links
-
-- [llama.cpp GitHub Repository](https://github.com/ggerganov/llama.cpp)
-- [llama.cpp Documentation](https://llama-cpp-python.readthedocs.io/)
-- [Hugging Face GGUF Models](https://huggingface.co/models?library=gguf)
-- [Open WebUI](https://openwebui.com/) - A great chat UI compatible with this server
-
-## Contributing
-
-This is a standalone management script. For improvements to the underlying llama.cpp, please contribute to the official repository.
 
 ---
 
-**Enjoy running local AI! 🚀**
+## Typical Workflow
+
+```bash
+./llamacpp-manager.sh
+#  → Pick backend (or Enter for auto-detect)
+#  → 0. Download New Model → paste HF repo
+#  → Select .gguf file
+#  → e. Edit Settings (tune n_ctx, n_gpu_layers, etc.)
+#  → 1. Server Mode  (or 2. CLI, or 0. SWEEP)
+#  → Server starts → Ctrl+C to stop
+```
+
+---
+
+## Tips
+
+- **GPU layers (`n_gpu_layers`):** Set to `-1` to offload all layers to the GPU. Adjust down if you hit OOM.
+- **Vision models:** The mmproj file enables image understanding. If it's in the repo, the script offers to download it.
+- **LAN access:** Change `"host": "127.0.0.1"` to `"0.0.0.0"` in the config to let other devices on your network connect to the server.
+- **Resuming:** Both binary and model downloads support resume. If interrupted, just re-run the script — it picks up where it left off.
+- **Updating binaries:** Run the script again and choose your backend — it detects the existing install and asks whether to pull the latest release.
+
+---
+
+## License
+
+This script is provided as-is. The llama.cpp binaries are under their respective upstream licenses.
