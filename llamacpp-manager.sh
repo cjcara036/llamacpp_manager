@@ -4,11 +4,12 @@
 set -e
 set +e # Allow command failures gracefully where handled
 
-SCRIPT_VERSION="v4.1.0-FIX"
+SCRIPT_VERSION="v4.2.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_INSTALL_DIR="$SCRIPT_DIR/llamacpp_bin"
 MODELS_DIR="$SCRIPT_DIR/Models"
 CONFIGS_DIR="$SCRIPT_DIR/Configs"
+LAST_USED_FILE="$CONFIGS_DIR/.last_used"
 
 mkdir -p "$MODELS_DIR" "$CONFIGS_DIR"
 
@@ -719,6 +720,37 @@ edit_model_config() {
 }
 
 # =============================================================================
+# VIEW PROFILE (NON-NULL SETTINGS)
+# Shows only the non-null items of a model's JSON profile. Item numbers are
+# the same as in the Configuration Editor, so they correspond 1:1.
+# =============================================================================
+view_model_config() {
+    local json_path="$1"
+
+    sync_config_with_binary "$json_path" "$CURRENT_EXE_PATH"
+
+    echo -e "\n\033[36m=== Profile View: $(basename "$json_path") ===\033[0m" >&2
+
+    readarray -t keys < <(jq -r 'keys[]' "$json_path")
+
+    local shown=0
+    for i in "${!keys[@]}"; do
+        local key="${keys[$i]}"
+        local val
+        val=$(jq -r --arg k "$key" '.[$k] | if . == null then "null" else tostring end' "$json_path")
+        if [[ -n "$val" && "$val" != "null" ]]; then
+            printf "  %2d. %-24s : %s\n" "$((i + 1))" "$key" "$val" >&2
+            ((shown++)) || true
+        fi
+    done
+
+    if (( shown == 0 )); then
+        echo -e "  \033[33mNo non-null settings in this profile.\033[0m" >&2
+    else
+        echo -e "  \033[90m$shown non-null setting(s). Item numbers match the Configuration Editor.\033[0m" >&2
+    fi
+}
+# =============================================================================
 # DELETE MODEL & CONFIG
 # =============================================================================
 delete_model_config() {
@@ -773,6 +805,12 @@ delete_model_config() {
             fi
         fi
 
+        if [[ -f "$LAST_USED_FILE" ]]; then
+            local lu
+            lu=$(grep '^config=' "$LAST_USED_FILE" 2>/dev/null | head -n 1 | cut -d'=' -f2-)
+            [[ "$lu" == "$json_path" ]] && rm -f "$LAST_USED_FILE"
+        fi
+
         echo -e "\033[32mModel and configuration deleted successfully.\033[0m" >&2
     else
         echo -e "\033[33mDeletion cancelled.\033[0m" >&2
@@ -792,6 +830,7 @@ select_model_config() {
         done
         if [[ ${#configs[@]} -gt 0 ]]; then
             echo -e "  \033[33me. [ Edit Settings for an Existing Config ]\033[0m" >&2
+            echo -e "  \033[36mv. [ View Profile (non-null settings) ]\033[0m" >&2
             echo -e "  \033[31md. [ Delete Model and its Config ]\033[0m" >&2
         fi
 
@@ -810,9 +849,23 @@ select_model_config() {
             if [[ $e_idx -ge 0 && $e_idx -lt ${#configs[@]} ]]; then
                 edit_model_config "${configs[$e_idx]}"
             fi
+        elif [[ "$choice" =~ ^[Vv]$ && ${#configs[@]} -gt 0 ]]; then
+            echo -e "\nSelect config to view:" >&2
+            for i in "${!configs[@]}"; do
+                echo "  $((i + 1)). $(basename "${configs[$i]}")" >&2
+            done
+            read -p "Choice (1-${#configs[@]}): " v_choice
+            local v_idx=$((v_choice - 1))
+            if [[ $v_idx -ge 0 && $v_idx -lt ${#configs[@]} ]]; then
+                view_model_config "${configs[$v_idx]}"
+            fi
         elif [[ "$choice" =~ ^[Dd]$ && ${#configs[@]} -gt 0 ]]; then
             delete_model_config
         else
+            if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
+                echo -e "\033[31mInvalid choice.\033[0m" >&2
+                continue
+            fi
             local index=$((choice - 1))
             if [[ $index -ge 0 && $index -lt ${#configs[@]} ]]; then
                 echo "${configs[$index]}"; return
@@ -1187,12 +1240,58 @@ start_sweep_mode() {
 # =============================================================================
 # ARGUMENT BUILDER AND RUNNER
 # =============================================================================
+# =============================================================================
+# KILL EXISTING SERVER INSTANCES
+# Ensures no stale llama-server is holding the host/port before we launch.
+# =============================================================================
+_kill_existing_servers() {
+    local pids
+    pids=$(pgrep -f "llamacpp_bin/.*llama-server" 2>/dev/null || true)
+    if [[ -z "$pids" ]]; then
+        return 0
+    fi
+
+    echo -e "\033[33mStopping existing llama-server instance(s): $(echo $pids | tr '\n' ' ')\033[0m" >&2
+    pkill -f "llamacpp_bin/.*llama-server" 2>/dev/null || true
+
+    local i
+    for i in 1 2 3 4 5; do
+        sleep 1
+        if ! pgrep -f "llamacpp_bin/.*llama-server" >/dev/null 2>&1; then
+            break
+        fi
+    done
+
+    if pgrep -f "llamacpp_bin/.*llama-server" >/dev/null 2>&1; then
+        echo -e "\033[33mForcibly killing remaining llama-server process(es)...\033[0m" >&2
+        pkill -9 -f "llamacpp_bin/.*llama-server" 2>/dev/null || true
+        sleep 1
+    fi
+}
+# =============================================================================
+# LAST-USED PROFILE TRACKING
+# Records the profile (config) of the most recent successful llamacpp run so
+# the non-interactive "server" argument relaunches exactly that profile.
+# =============================================================================
+record_last_used() {
+    local config_file="$1"
+    local tmp
+    tmp=$(mktemp)
+    {
+        echo "config=$config_file"
+        echo "timestamp=$(date '+%Y-%m-%d %H:%M:%S')"
+    } > "$tmp" && mv "$tmp" "$LAST_USED_FILE"
+}
+
 start_llama_app() {
     local executable_path="$1"
     local config_file="$2"
     local mode="$3"
 
     CURRENT_EXE_PATH="$executable_path"
+    if [[ "$mode" == "server" ]]; then
+        _kill_existing_servers
+    fi
 
     echo -e "\n\033[36mLoading configuration...\033[0m"
 
@@ -1222,13 +1321,104 @@ start_llama_app() {
     echo -e "\033[35m========================================================\n\033[0m"
 
     echo -e "\033[90mExecuting: $executable_path ${ARG_LIST[*]}\033[0m\n"
-    "$executable_path" "${ARG_LIST[@]}"
+
+    local rc=0
+    if [[ "$mode" == "server" ]]; then
+        "$executable_path" "${ARG_LIST[@]}" &
+        local server_pid=$!
+
+        local host port health_host
+        host=$(jq -r '.host // "127.0.0.1"' "$config_file")
+        port=$(jq -r '.port // 8080' "$config_file")
+        [[ "$host" == "null" || -z "$host" ]] && host="127.0.0.1"
+        [[ "$port" == "null" || -z "$port" ]] && port=8080
+        health_host="$host"
+        [[ "$health_host" == "0.0.0.0" ]] && health_host="127.0.0.1"
+
+        local healthy=false waited=0
+        while kill -0 "$server_pid" 2>/dev/null; do
+            if curl -sf --max-time 2 "http://${health_host}:${port}/health" 2>/dev/null | grep -q '"ok"'; then
+                healthy=true
+                break
+            fi
+            sleep 1
+            (( waited++ )) || true
+            (( waited > 300 )) && break
+        done
+
+        if [[ "$healthy" == true ]]; then
+            record_last_used "$config_file"
+            echo -e "  \033[32mServer healthy - profile recorded as last successfully used.\033[0m"
+        fi
+
+        wait "$server_pid"
+        rc=$?
+    else
+        "$executable_path" "${ARG_LIST[@]}"
+        rc=$?
+        if [[ $rc -eq 0 ]]; then
+            record_last_used "$config_file"
+        fi
+    fi
+    return $rc
 }
 
 # =============================================================================
 # MAIN ENTRYPOINT
 # =============================================================================
+# =============================================================================
+# AUTO SERVER MODE (non-interactive)
+# Triggered whenever the script is invoked with at least one argument.
+# Picks the newest installed llama-server backend and the last successfully
+# used recipe (falls back to newest config by modification time) and launches
+# it in server mode.
+# =============================================================================
+auto_server_mode() {
+    local server_exe=""
+    local newest_mtime=0
+    local candidate mtime
+
+    while IFS= read -r candidate; do
+        mtime=$(stat -c %Y "$candidate" 2>/dev/null || echo 0)
+        if [[ "$mtime" -gt "$newest_mtime" ]]; then
+            newest_mtime="$mtime"
+            server_exe="$candidate"
+        fi
+    done < <(find "$BASE_INSTALL_DIR" -type f -name "llama-server" 2>/dev/null)
+
+    if [[ -z "$server_exe" ]]; then
+        echo -e "\033[31mAuto server mode: no installed llama-server binary found under $BASE_INSTALL_DIR.\033[0m" >&2
+        echo -e "\033[31mRun the manager interactively once (no arguments) to download a backend.\033[0m" >&2
+        exit 1
+    fi
+
+    local latest_config
+    latest_config=$(find "$CONFIGS_DIR" -maxdepth 1 -name "*.json" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | cut -d' ' -f2-)
+    if [[ -z "$latest_config" ]]; then
+        echo -e "\033[31mAuto server mode: no recipe configs found in $CONFIGS_DIR.\033[0m" >&2
+        exit 1
+    fi
+
+    # Prefer the last profile that was successfully used in a llamacpp run.
+    local config_source="last modified"
+    if [[ -f "$LAST_USED_FILE" ]]; then
+        local last_used
+        last_used=$(grep '^config=' "$LAST_USED_FILE" 2>/dev/null | head -n 1 | cut -d'=' -f2-)
+        if [[ -n "$last_used" && -f "$last_used" ]]; then
+            latest_config="$last_used"
+            config_source="last successfully used"
+        fi
+    fi
+
+    echo -e "\033[36mAuto server mode: backend = $(basename "$(dirname "$server_exe")"), recipe = $(basename "$latest_config") ($config_source)\033[0m" >&2
+    start_llama_app "$server_exe" "$latest_config" "server"
+}
+
 main() {
+    if [[ $# -gt 0 ]]; then
+        auto_server_mode "$@"
+        return
+    fi
     runner_path=$(setup_backend)
     selected_config=$(select_model_config)
 
