@@ -37,6 +37,15 @@ chmod +x llamacpp-manager.sh
 
 That's it. The script walks you through everything.
 
+### Non-Interactive Server Mode
+
+Run the script with any argument (e.g. `server`) to skip the interactive menus and launch `llama-server` immediately:
+
+```bash
+./llamacpp-manager.sh server
+```
+
+It picks the newest installed backend and the **last profile that was successfully used** in a previous llamacpp run (recorded automatically in `Configs/.last_used` when a server becomes healthy — or a run exits cleanly). If no successful run has been recorded yet, it falls back to the most recently modified config.
 ---
 
 ## What Happens Step-by-Step
@@ -111,6 +120,10 @@ Press **`e`** in the model menu to open the editor. For every setting you get:
 
 Type a new value to change it. Type `null` or leave blank to reset.
 
+### 6b. View Profile
+
+Press **`v`** in the model menu to view a profile without entering the editor. It lists only the **non-null** settings of a model's JSON config, each with its **item number** — the same numbering used by the Configuration Editor, so you can jump straight to any setting you see.
+
 ### 7. Run Modes
 
 | Mode | Binary | What it does |
@@ -154,7 +167,8 @@ Each phase tests the best result from the previous phase, so it converges quickl
 │   │   └── mmproj*.gguf        # (optional vision projector)
 └── Configs/
     ├── qwen3-8b-instruct.json   # One config per model
-    └── llama-3-8b.json
+    ├── llama-3-8b.json
+    └── .last_used               # Tracks last successfully used profile (auto)
 ```
 
 ---
@@ -167,8 +181,12 @@ Each phase tests the best result from the previous phase, so it converges quickl
 #  → 0. Download New Model → paste HF repo
 #  → Select .gguf file
 #  → e. Edit Settings (tune n_ctx, n_gpu_layers, etc.)
+#  → v. View Profile (non-null settings + item numbers)
 #  → 1. Server Mode  (or 2. CLI, or 0. SWEEP)
 #  → Server starts → Ctrl+C to stop
+#
+# Later, relaunch the last good profile headless:
+#  ./llamacpp-manager.sh server
 ```
 
 ---
